@@ -1,0 +1,522 @@
+#===============================================================================
+# genstr - 文字列生成ツール
+#===============================================================================
+# [使用方法]
+#  genstr [-e|-E] rule {cmd | -c filename}
+#  genstr [-e|-E] [-F fs] -f filename [-l line] [-H] {cmd | -c filename}
+#===============================================================================
+# [変更履歴]
+# Ver1.00  2000/11/14 初版作成(Linux版)
+# Ver2.00  2022/12/13 cmdファイル入力追加、1つのawkファイルに処理統合
+# Ver2.01  2022/12/25 リストファイル内の行指定追加
+# Ver2.02  2023/01/08 ヘルプのmore表示、リストファイルのヘッダ参照機能追加
+# Ver2.03  2023/01/16 リストファイル ヘッダ参照機能の不具合修正
+# Ver2.04  2023/04/08 オプション文字列を部分一致で判定している不具合修正
+#                     ruleで文字のFrom-To形式を指定した際の不具合修正
+# Ver2.05  2024/05/11 ruleの内部データ区切り文字(/→,)修正
+
+BEGIN {
+	# gExcPtnの値定義
+	DISPLAY_ONLY = 0;        # コマンド表示のみ
+	EXECUTE_ONLY = 1;        # コマンド実行のみ
+	DISPLAY_EXECUTE = 2;     # コマンド表示＋実行
+
+	# 初期化
+	gExcPtn = DISPLAY_ONLY;  # 実行パターン
+	gRule = "";              # ルール文字列
+	gRuleFile = "";          # リストファイル名
+	gRuleFileLine = "";      # リストファイルの行指定
+	gHeader = 0              # リストファイルのヘッダ参照(0:無効、1:有効)
+	gCmd = "";               # コマンド文字列
+	gCmdFile = "";           # コマンドファイル名
+	gFs = " ";               # リストファイルの区切り文字
+	arg1 = "";
+	arg2 = "";
+
+	OptId = "";              # オプションの種別
+	ArgIdx = 1;              # オプション以外のN番目のパラメータ
+
+	gErrFlg = 0;
+}
+
+{
+	# "～"入力パラメータの「"」削除
+	gsub(/ $/, "");	 # なぜか引数の最後に空白が入るので削除
+	argc = split($0, argv, "\x01");  # Ctrl+Aを区切り文字として渡される
+	for (i = 1; i <= argc; ++i) {
+		if (argv[i] ~ /^"/ && argv[i] ~ /"$/) {
+			argv[i] = substr(argv[i], 2, length(argv[i]) - 2);
+		}
+#printf("*** argv[%d] = /%s/\n", i, argv[i]);
+	}
+	if (argc == 0) DspHelp("", "");
+
+	# 入力パラメータの解析
+	for (i = 1; i <= argc; ++i) {
+		if (argv[i] == "-e") {
+			gExcPtn = EXECUTE_ONLY;
+		} else if (argv[i] == "-E") {
+			gExcPtn = DISPLAY_EXECUTE;
+		} else if (argv[i] == "-H") {
+			gHeader = 1;
+		} else if (argv[i] ~ /^-[fFlc]$/) {
+			OptId = argv[i];
+		} else if (substr(argv[i], 1, 1) == "-") {
+			DspHelp("Opt", argv[i]);
+		} else {
+			if (OptId != "") {
+				if (OptId == "-f") {
+					gRuleFile = argv[i];
+				} else if (OptId == "-F") {
+					gFs = argv[i];
+				} else if (OptId == "-l") {
+					gRuleFileLine = argv[i];
+				} else if (OptId == "-c") {
+					gCmdFile = argv[i];
+				} else {
+					DspHelp("Opt", argv[i]);
+				}
+			} else {
+				if (ArgIdx == 1) {
+					arg1 = argv[i];
+				} else if (ArgIdx == 2) {
+					arg2 = argv[i];
+				} else {
+					DspHelp("Arg", argv[i]);
+				}
+				++ArgIdx;
+			}
+			OptId = "";
+		}
+#printf("*** arg[%d] = /%s/, p1=/%s/, p2=/%s/, idx=%d\n", i, argv[i], arg1, arg2, ArgIdx);
+
+		if (OptId != "") {
+			if (i == argc) {
+				DspHelp("NoParam", OptId);
+			} else if (PreOptId != "" && PreOptId == OptId) {
+				DspHelp("NoParam", OptId);
+			}
+			PreOptId = OptId;
+		} else {
+			PreOptId = "";
+		}
+	}
+
+	if (gRuleFile != "") {
+		if (gCmdFile == "") {
+			if (arg1 == "") {
+				DspHelp("Less", "");
+			} else if (arg2 != "") {
+				DspHelp("Arg", arg2);
+			}
+			gCmd = arg1;
+		} else {
+			if (arg1 != "") {
+				DspHelp("Arg", arg1);
+			} else if (arg2 != "") {
+				DspHelp("Arg", arg2);
+			}
+			gCmd = get_cmd_file();
+		}
+	} else {
+		if (gRuleFileLine != "") {
+			DspHelp("Opt", "-l");
+		} else if (gCmdFile == "") {
+			if (arg1 == "" || arg2 == "") {
+				DspHelp("Less", "");
+			}
+			gRule = arg1;
+			gCmd = arg2;
+		} else {
+			if (arg1 == "") {
+				DspHelp("Less", "");
+			} else if (arg2 != "") {
+				DspHelp("Arg", arg2);
+			}
+			gRule = arg1;
+			gCmd = get_cmd_file();
+		}
+	}
+#printf("*** Rule=/%s/, Cmd=/%s/\n", gRule, gCmd);
+}
+
+END {
+	if (gErrFlg == 0) {
+		if (gRuleFile == "") {
+			# ルール指定の処理
+			list[0] = 0;
+			list_cnt = rule_check(gRule, list);
+			genstr(gCmd, list, 1, list_cnt);
+		} else {
+			# ルールファイル指定の処理
+			file_exec();
+		}
+	}
+}
+
+# ルールファイルによる文字列生成
+function file_exec(line, expr, row, i, cmd, arg, arg_cnt) {
+	# 行番号判定用の正規表現作成("1/2/3" -> "^(1|2|3)$")
+	if (gRuleFileLine != "") {
+		expr = list_check(gRuleFileLine);
+		gsub(",", "|", expr);
+		expr = "^(" expr ")$";
+	} else {
+		expr = ".*";
+	}
+
+	# ルールファイルを行単位で処理
+	row = 1;
+	while (getline line < gRuleFile > 0) {
+		if (gHeader == 1 && row == 1) {
+			split(line, header, gFs);
+		} else {
+			if (row ~ expr) { # 対象行番号
+				cmd = gCmd;
+				arg_cnt = split(line, arg, gFs);
+				for (i = 1; i <= arg_cnt; ++i) {
+					if (gHeader && header[i] != "") {
+						# ヘッダの項目名キーを置換
+						cmd = replace(cmd, "%" header[i], arg[i]);
+					}
+				}
+
+				for (i = 1; i <= arg_cnt; ++i) {
+					# %nを置換
+					cmd = num_replace(cmd, i, arg[i]);
+				}
+
+				exec_cmd(cmd);
+			}
+		}
+
+		++row;
+	}
+}
+
+# コマンドファイルの読込み
+function get_cmd_file(line, cmd) {
+	cmd = ""
+	while (getline line < gCmdFile > 0) {
+		cmd = cmd line "\n";
+	}
+
+	return cmd
+}
+
+# Rule内のリスト内容チェック
+#  p1:ルール文字列、p2:ルール内リスト
+#  return -> ルール内リスト数
+function rule_check(rule, list, i, list_cnt) {
+	list_cnt = split(rule, list, ":");
+	for (i = 1; i <= list_cnt; ++i) {
+		list[i] = list_check(list[i]);
+	}
+
+	return list_cnt;
+}
+
+# リストのCSV化
+#  p1:ルール内リスト
+#  return -> CSV化('/'区切り)したリスト
+function list_check(list, arg, cnt, i, result) {
+	result = "";
+	cnt = split(list, arg, ",");
+	for (i = 1; i <= cnt; ++i) {
+		if (arg[i] ~ /-/) {
+			arg[i] = from_to_cvt(arg[i]);
+		}
+
+		if (result == "") {
+			result = arg[i];
+		} else {
+			result = result "," arg[i];
+		}
+	}
+
+	return result;
+}
+
+# From-To指定のCSV化
+#  p1:ルール内リスト(From-To形式)
+#  return -> CSV化('/'区切り)したリスト
+function from_to_cvt(value, arg, i, fmt, len, eflg, result) {
+	result = "";
+	split(value, arg, "-");
+
+	eflg = 0;
+	if (arg[1] ~ /^[0-9]+$/) {
+		if (arg[1] > arg[2])	eflg = 1;
+
+		len = length(arg[1]);
+		fmt = sprintf("%%0%dd", len);
+	} else {
+		fmt = "%s";
+	}
+
+	while (eflg == 0) {
+		if (arg[1] == arg[2] || arg[1] == "" || arg[2] == "")
+			eflg = 1;
+
+		if (result == "") {
+			result = sprintf(fmt, arg[1]);
+		} else {
+			result = result "," sprintf(fmt, arg[1]);
+		}
+
+		if (arg[1] ~ /^[0-9]+$/) {
+			++arg[1];
+		} else {
+			arg[1] = inc_str(arg[1]);
+		}
+	}
+
+	return result;
+}
+
+# 次のシーケンシャル文字列生成
+#  p1:シーケンシャル文字列(a->b->...->z->aa)
+#  return -> 次のシーケンシャル文字列
+function inc_str(str, chr, i, str_len, base, base_idx, base_len, moveup) {
+	str_len = length(str);
+	for (i = str_len; i > 0; --i) {
+		# 文字列の後ろから前に1文字づつ処理
+		chr = substr(str, i, 1);
+
+		#  基本文字列の設定
+		if (chr >= "0" && chr <= "9") {
+			base = "0123456789";
+			moveup = "1";
+		} else if (chr >= "a" && chr <= "z") {
+			base = "abcdefghijklmnopqrstuvwxyz";
+			moveup = "a";
+		} else if (chr >= "A" && chr <= "Z") {
+			base = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+			moveup = "A";
+		}
+
+		# 基本文字列内における次の位置を算出
+		base_idx = index(base, chr);
+		base_len = length(base);
+		base_idx = (base_idx % base_len) + 1;
+
+		# 基本文字列内の次の文字に置換え
+		str = substr(str, 1, i-1) substr(base, base_idx, 1) substr(str, i+1);
+
+		if (base_idx != 1) break;
+	}
+
+	# 基本文字列内の最後から先頭に戻って終わった場合は、繰上げ文字を追加
+	if (base_idx == 1) {
+		str = moveup str;
+	}
+
+	return str;
+}
+
+# 文字列生成
+# [概要]N番目リスト内の値分ループ中に、N+1番目リスト処理のため再帰呼出し
+#  p1:コマンド文字列(%n変換前)
+#  p2:リストデータ
+#  p3:リストのN番目
+#  p4:リストの最大数
+function genstr(cmd, list_data, list_idx, list_max, i, arg, arg_cnt, stat, result) {
+	if (list_idx <= list_max) {
+		arg_cnt = split(list_data[list_idx], arg, ",");
+		for (i = 1; i <= arg_cnt; ++i) {
+			result = num_replace(cmd, list_idx, arg[i]);
+			genstr(result, list_data, list_idx+1, list_max);
+		}
+	} else {
+		exec_cmd(cmd);
+	}
+}
+
+# 生成文字列の出力/実行
+#  p1:コマンド文字列(%n変換後)
+function exec_cmd(cmd, stat, result) {
+	stat = 0;
+	result = sprintf("%s", cmd);
+	if (gExcPtn == DISPLAY_ONLY) {
+		printf("%s\n", result);
+	} else if (gExcPtn == EXECUTE_ONLY) {
+		stat = system(result);
+	} else if (gExcPtn == DISPLAY_EXECUTE) {
+		printf("%s\n", result);
+		stat = system(result);
+	}
+
+	# Ctrl-C による中断
+	if (stat == 130) exit;
+}
+
+# %nの置換
+#  p1:%nを含む文字列
+#  p2:%nの数字
+#  p3:置換する文字列
+#  return -> 
+function num_replace(str, idx, dest, i, c, save_num, save_flg, result) {
+	save_flg = 0;
+	save_num = "";
+	result = "";
+	for (i = 1; c = substr(str, i, 1); ++i) {
+		if (c == "%") {
+			if (save_flg == 1) {
+				if (save_num == idx) {
+					result = result dest;
+				} else {
+					result = result "%" save_num;
+				}
+				save_num = "";
+			}
+			save_flg = 1;
+		} else {
+			if (save_flg == 1) {
+				if (c ~ /[0-9]/) {
+					save_num = save_num c;
+				} else {
+					if (save_num == idx) {
+						result = result dest;
+					} else {
+						result = result "%" save_num;
+					}
+					save_num = "";
+					save_flg = 0;
+					result = result c;
+				}
+			} else {
+				result = result c;
+			}
+		}
+	}
+
+	if (save_flg == 1) {
+		if (save_num == idx) {
+			result = result dest;
+		} else {
+			result = result "%" save_num;
+		}
+	}
+
+	return result;
+}
+
+# 文字列を置換する
+#  p1:検索される文字列
+#  p2:検索する文字列
+#  p3:置換する文字列
+#  return -> 検索文字列を置換した文字列
+function replace(OrgStr, PreStr, PostStr, EdtStr, PreLen, PostLen, SttIdx) {
+	EdtStr  = OrgStr;
+	PreLen  = length(PreStr);
+	PostLen = length(PostStr);
+	SttIdx  = 1;
+	while (MchIdx = search(EdtStr, PreStr, SttIdx)) {
+		EdtStr = substr(EdtStr, 1, MchIdx - 1) \
+		         PostStr \
+		         substr(EdtStr, MchIdx + PreLen);
+		SttIdx = MchIdx + PostLen;
+	}
+
+	return EdtStr;
+}
+
+# 文字列位置の検索
+#  p1:検索される文字列
+#  p2:検索する文字列
+#  p3:検索開始位置(1～)
+#  return -> 有:先頭からの文字列位置、無:0
+function search(OrgStr, SrchStr, SttPos, Idx) {
+	Idx = index(substr(OrgStr, SttPos), SrchStr);
+	if (Idx > 0) {
+		Idx += (SttPos - 1);
+	}
+
+	return Idx;
+}
+
+# ヘルプ表示
+function DspHelp(Id, Param, Msg) {
+	if (gErrFlg == 1) return;
+
+	if (Id != "") {
+		printf("%%Error, ");
+		if (Id == "Opt") {
+			printf("指定されたオプション(%s)が異常です。\n", Param);
+		} else if (Id == "Arg") {
+			printf("余計なパラメータ(%s)が有ります。\n", Param);
+		} else if (Id == "NoParam") {
+			printf("オプション(%s)に対応する値が指定されていません。\n", Param);
+		} else if (Id == "DupOpt") {
+			printf("オプション(%s)が重複して指定されています。\n", Param);
+		} else if (Id == "Less") {
+			printf("必要なパラメータが指定されていません。\n");
+		}
+		gErrFlg = 1;
+		exit;
+	}
+
+	Msg = \
+	"genstr - 文字列生成ツール\n" \
+	"\n" \
+	"Usage : genstr [-e|-E] rule {cmd|-c filename}\n" \
+	"        genstr [-e|-E] [-F fs] [-l line] [-H] -f filename {cmd|-c filename}\n" \
+	"\n" \
+	"  -e   : 生成した文字列をコマンド実行(コマンド表示なし)\n" \
+	"  -E   : 生成した文字列をコマンド実行(コマンド表示あり)\n" \
+	"  rule : %1_list:%2_list2:...:%n_list\n" \
+	"           %n_list : a-b    (From-To形式:a,bは数字)\n" \
+	"                     x,y,.. (CSV形式:x,yは英数字)\n" \
+	"  cmd  : %1～%nを含む文字列(listの内容で置換)\n" \
+	"  -c   : cmdのファイル入力\n" \
+	"  -f   : リストファイル入力(CSV形式)\n" \
+	"  -F   : リストファイルの区切り文字(default=スペース)\n" \
+	"  -l   : リストファイル内の行指定\n" \
+	"           line : a-b    (From-To形式:a,bは数字)\n" \
+	"                  x,y,.. (CSV形式:x,yは数字)\n" \
+	"  -H   : リストファイル1行目をヘッダ指定(cmd内で「%項目名」使用可)\n" \
+	"\n" \
+	"  ex.\n" \
+	"    genstr \"00-23:01-59:01-59\" \"touch 20221210%1%2%3.log\"\n" \
+	"    genstr -f param.csv \"tel2acc %1\"\n" \
+	"    genstr -f host.csv -l 1-2 \"sshpass -p '%3' ssh %2@%1 'check.sh'\"\n" \
+	"\n" \
+	"[処理概要]\n" \
+	" ruleで指定したlist1～nの全組合せをcmd内の%1～%nに置換えて文字列を生成する。\n" \
+	" または、リストファイル内の各カラムをcmd内の%1～%nに置換えて文字列を生成する。\n" \
+	" 生成した文字列はオプションにより、そのままコマンドとして実行可能。\n" \
+	" (文字列内のパイプ(|)やリダイレクト(>, >>)も有効)\n" \
+	" rule,cmdは指定順の制約はあるが、オプションは指定順の制約は無い。\n" \
+	" (例．生成文字列を確認してから、コマンド履歴の最後に -E を付与して実行)\n" \
+	"\n" \
+	"[listの指定方法]\n" \
+	" listはコロン(:)で区切って複数を指定可能。\n" \
+	" 各listは、From-To形式(例．1-10)、CSV形式(例．aa,bb,cc)で指定する。\n" \
+	" From-To/CSV形式の混在も可能(例．1-4,7,9-11)。\n" \
+	" Fromを0埋め(例．001)で指定するとcmd内の%1～%nを0埋めで置換える。\n" \
+	"\n" \
+	"[リストファイルの使用方法]\n" \
+	" -f filenameで、リストファイル入力を指定する。\n" \
+	" -F(例．-F ,)で区切り文字を変更可能(default=スペース)。\n" \
+	" -l(例．-l 1-3,5)で指定した行のみ実行可能。\n" \
+	" -Hを指定した場合、リストファイルの1行目をヘッダ行とみなす。\n" \
+	"   ヘッダの各カラム(項目名)をcmd内で「%項目名」と記述すれば、\n" \
+	"   2行目以降の各カラムで置換える。\n" \
+	"\n" \
+	"[cmdの使用方法]\n" \
+	" %1～%nを含む文字列で指定する。\n" \
+	" (内部処理では、'%'+'連続した数字'を置換対象として検索する)\n" \
+	" -cで複数行あるファイル指定し、置換結果をファイル出力したい場合、\n" \
+	"   以下のように記述して実行する。\n" \
+	"     cat << EOF > %1.json\n" \
+	"     {\n" \
+	"        \"aa\" : \"%2\",\n" \
+	"        \"bb\" : \"%3\",\n" \
+	"     }\n" \
+	"     EOF\n" \
+	"";
+	printf("%s", Msg) | "more";
+
+	gErrFlg = 1;
+	exit;
+}
