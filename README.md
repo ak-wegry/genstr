@@ -13,7 +13,7 @@ genstrは、指定されたルールやリストファイルに基づいて文�
 ## 🖥️ 対応環境
 
 - Linux: `genstr` (シェルスクリプト + awk)
-- Windows: `genstr.bat` + `genstr.awk`
+- Windows: `genstr.bat` + `genstr.awk`  
   ※ 実行には gawk for Windows（`gawk.exe`）が必要です。`PATH` の通ったディレクトリに配置してください。
 
 ## 🚀 インストール方法
